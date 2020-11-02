@@ -1,5 +1,5 @@
-# Blink Example
+# Test I2S In (parallel) on ESP32 with APLL driving I2S engine
 
-Starts a FreeRTOS task to blink an LED
+Using this approach I can't seem to exceed reading ~32 MHz (frowny-face).
 
-See the README.md file in the upper level 'examples' directory for more information about examples.
+But, the repo is a pretty good grab-bag.  Now, if only I could figure out why serial didn't work.
