@@ -23,6 +23,9 @@
 #include "regi2c_apll.h"
 #include "soc/rtc.h"
 
+#include "soc/efuse_reg.h" //For reading chip rev.
+#include "regi2c_ctrl.h" //For APLL setup
+
 #define I2S_NO 0
 #define SERIAL_TEST 0
 
@@ -101,6 +104,58 @@ static esp_err_t dma_desc_init()
 }
 
 
+void local_rtc_clk_apll_enable(bool enable, uint32_t sdm0, uint32_t sdm1, uint32_t sdm2, uint32_t o_div)
+{
+	#define APLL_SDM_STOP_VAL_2_REV1    0x49
+	#define APLL_SDM_STOP_VAL_2_REV0    0x69
+	#define APLL_SDM_STOP_VAL_1         0x09
+	#define APLL_CAL_DELAY_1            0x0f
+	#define APLL_CAL_DELAY_2            0x3f
+	#define APLL_CAL_DELAY_3            0x1f
+
+    REG_SET_FIELD(RTC_CNTL_ANA_CONF_REG, RTC_CNTL_PLLA_FORCE_PD, enable ? 0 : 1);
+    REG_SET_FIELD(RTC_CNTL_ANA_CONF_REG, RTC_CNTL_PLLA_FORCE_PU, enable ? 1 : 0);
+
+    if (!enable &&
+        REG_GET_FIELD(RTC_CNTL_CLK_CONF_REG, RTC_CNTL_SOC_CLK_SEL) != RTC_CNTL_SOC_CLK_SEL_PLL) {
+        REG_SET_BIT(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_BIAS_I2C_FORCE_PD);
+    } else {
+        REG_CLR_BIT(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_BIAS_I2C_FORCE_PD);
+    }
+
+    if (enable) {
+        uint8_t sdm_stop_val_2 = APLL_SDM_STOP_VAL_2_REV1;
+        uint32_t is_rev0 = (GET_PERI_REG_BITS2(EFUSE_BLK0_RDATA3_REG, 1, 15) == 0);
+        if (is_rev0) {
+            sdm0 = 0;
+            sdm1 = 0;
+            sdm_stop_val_2 = APLL_SDM_STOP_VAL_2_REV0;
+        }
+        REGI2C_WRITE_MASK(I2C_APLL, I2C_APLL_DSDM2, sdm2);
+        REGI2C_WRITE_MASK(I2C_APLL, I2C_APLL_DSDM0, sdm0);
+        REGI2C_WRITE_MASK(I2C_APLL, I2C_APLL_DSDM1, sdm1);
+        REGI2C_WRITE(I2C_APLL, I2C_APLL_SDM_STOP, APLL_SDM_STOP_VAL_1);
+        REGI2C_WRITE(I2C_APLL, I2C_APLL_SDM_STOP, sdm_stop_val_2);
+        REGI2C_WRITE_MASK(I2C_APLL, I2C_APLL_OR_OUTPUT_DIV, o_div);
+
+        /* calibration */
+        REGI2C_WRITE(I2C_APLL, I2C_APLL_IR_CAL_DELAY, APLL_CAL_DELAY_1);
+        REGI2C_WRITE(I2C_APLL, I2C_APLL_IR_CAL_DELAY, APLL_CAL_DELAY_2);
+        REGI2C_WRITE(I2C_APLL, I2C_APLL_IR_CAL_DELAY, APLL_CAL_DELAY_3);
+
+		printf( "%08x\n", REGI2C_READ(I2C_APLL, I2C_APLL_DSDM0 ) );
+        /* wait for calibration end */
+		int retries = 0;
+        while (!(REGI2C_READ_MASK(I2C_APLL, I2C_APLL_OR_CAL_END)) && retries < 1000 ) {
+		printf( "%08x\n", REGI2C_READ(I2C_APLL, I2C_APLL_DSDM0 ) );
+            /* use esp_rom_delay_us so the RTC bus doesn't get flooded */
+            esp_rom_delay_us(1);
+			retries++;
+        }
+    }
+}
+
+
 static void enable_out_clock() {
 
 #if 0
@@ -133,6 +188,13 @@ static void enable_out_clock() {
 
 static void i2s_init()
 {
+	//Actually enable PLLA (My calculations are a little low, comparing to reality not sure why.)
+	//Example SDM2=8 -> 40 * (8+4) = 480 / (2*(10+2)) = 20 MHz received 5MHz (why div4?)
+	//local_rtc_clk_apll_enable( 1, 0/*sdm0*/, 0 /*sdm1*/, 8 /*sdm2*/, 10 /*div*/ );
+
+	//480/4 = 120 -> 120 MHz out
+	local_rtc_clk_apll_enable( 1, 0/*sdm0*/, 0 /*sdm1*/, 8 /*sdm2*/, 0 /*div*/ );
+
 
 //#define I2S_D0 4
 #define I2S_D1 5
@@ -197,12 +259,11 @@ static void i2s_init()
     gpio_config(&conf);
 
     gpio_matrix_out(I2S_CLK,  I2SnI_BCK_OUT_IDX, false, 0 );
-    gpio_matrix_out(I2S_WCLK,  I2SnI_WS_OUT_IDX, false, 0 );
+//    gpio_matrix_out(I2S_WCLK,  I2SnI_WS_OUT_IDX, false, 0 );
+
+
 
     periph_module_enable(PERIPH_I2Sn_MODULE(I2S_NO));
-
-
-
 
     SET_PERI_REG_BITS(I2S_LC_CONF_REG(I2S_NO), 0x1, 1, I2S_IN_RST_S);
     SET_PERI_REG_BITS(I2S_LC_CONF_REG(I2S_NO), 0x1, 0, I2S_IN_RST_S);
@@ -247,19 +308,7 @@ static void i2s_init()
                    I2S_CLKA_ENA | I2S_CLK_EN |
                    (0 << I2S_CLKM_DIV_A_S) |
                    (0 << I2S_CLKM_DIV_B_S) |
-                   (1 << I2S_CLKM_DIV_NUM_S));
-
-
-	SET_PERI_REG_BITS( RTC_CNTL_ANA_CONF_REG, 0x01, 1, RTC_CNTL_PLLA_FORCE_PU_S );
-	//Actually enable PLLA (My calculations are a little low, comparing to reality not sure why.)
-	//Example SDM0=10, DIV=10: (10+4)*40/(2*(10+2)) = 23MHz
-	//rtc_clk_apll_enable( 1, 10/*sdm0*/, 0 /*sdm1*/, 0 /*sdm2*/, 10 /*div*/ );
-	//Example SDM0=10, DIV=10: (10+4)*40/(2*(0+2)) = 140MHz or about 35 MHz.
-	rtc_clk_apll_enable( 1, 5/*sdm0*/, 0 /*sdm1*/, 0 /*sdm2*/, 4 /*div*/ );
-	rtc_clk_apll_enable( 1, 10/*sdm0*/, 0 /*sdm1*/, 0 /*sdm2*/, 4 /*div*/ );
-
-	//Setup PLLA
-
+                   (1 << I2S_CLKM_DIV_NUM_S)); //Supposed to be 2 at minimum switching to 1 is fruitless.
 
 
     SET_PERI_REG_BITS(I2S_CONF_REG(I2S_NO), 0x1, 1, I2S_RX_MONO_S);       //Seem ignored in parallel mode
@@ -302,13 +351,11 @@ static void i2s_init()
 #endif
 
 
-	//If you don't do this, BCK will be limited to 13.3333 MHz.
-
 	SET_PERI_REG_BITS(I2S_SAMPLE_RATE_CONF_REG(I2S_NO), I2S_RX_BCK_DIV_NUM, 2, I2S_RX_BCK_DIV_NUM_S);  
 
 	//ERR NOTE -> Under current config these values are 2x the Hz of what is listed here.
-	//Once set, 1 = you can read all 8 bits at 40 MHz.
-	//Once set, 2 = you can read all 8 bits at 20 MHz.
+	//Once set, 1 = you can read all 8 bits at 40 MHz. -> Warning, this is "technically" prhibited. It seems to be lying about this speed.
+	//Once set, 2 = you can read all 8 bits at 20 MHz. -> Practically highest speed.
 	//			3 = 13.33333 MHz
 	//			4 = 10.0MHz
 }
@@ -388,10 +435,30 @@ void app_main(void)
 	int chm = 0;
 	int fim = 0;
 
+        uint32_t is_rev0 = (GET_PERI_REG_BITS2(EFUSE_BLK0_RDATA3_REG, 1, 15) == 0);
+	printf( "Is rev0: %d\n", is_rev0 );
+
+
+/*
+	//Scan over all locations in the matrix in case one of the hidden IOs are hiding something neat.
+	//Conclusion: No.
+
+	int i;
+	for( i = 0; i < 500; i++ )
+	{
+	    gpio_matrix_out(I2S_WCLK,  i, false, 0 );
+        vTaskDelay(1);
+	}
+*/
+
+
+//	int sdm2;
+//	sdm2 = 1;
     while(1) {
         vTaskDelay(1000 / portTICK_PERIOD_MS);
 		printf("Tick %d %d %d %08x %08x\n", (isr_count-lastl)*BUFF_SIZE_BYTES, fim, chm, i2sbuffer[0][0], READ_PERI_REG(I2S_CLKM_CONF_REG(I2S_NO)) );
-
+ //       REGI2C_WRITE_MASK(I2C_APLL, I2C_APLL_DSDM0, sdm2);
+//		sdm2++;
 		lastl = isr_count;
 #if !SERIAL_TEST
 		chm++;
