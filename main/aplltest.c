@@ -193,7 +193,7 @@ static void i2s_init()
 	//local_rtc_clk_apll_enable( 1, 0/*sdm0*/, 0 /*sdm1*/, 8 /*sdm2*/, 10 /*div*/ );
 
 	//480/4 = 120 -> 120 MHz out
-	local_rtc_clk_apll_enable( 1, 0/*sdm0*/, 0 /*sdm1*/, 8 /*sdm2*/, 0 /*div*/ );
+	local_rtc_clk_apll_enable( 1, 0/*sdm0*/, 200 /*sdm1*/, 8 /*sdm2*/, 0 /*div*/ );
 
 
 //#define I2S_D0 4
